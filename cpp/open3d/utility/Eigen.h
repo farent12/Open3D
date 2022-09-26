@@ -50,6 +50,8 @@ typedef Eigen::Matrix<double, 4, 4, Eigen::DontAlign> Matrix4d_u;
 namespace open3d {
 namespace utility {
 
+#ifndef EIGEN_VECTOR_SPECIALIZATION
+#define EIGEN_VECTOR_SPECIALIZATION
 using Matrix4d_allocator = Eigen::aligned_allocator<Eigen::Matrix4d>;
 using Matrix6d_allocator = Eigen::aligned_allocator<Eigen::Matrix6d>;
 using Vector2d_allocator = Eigen::aligned_allocator<Eigen::Vector2d>;
@@ -57,6 +59,7 @@ using Vector3uint8_allocator = Eigen::aligned_allocator<Eigen::Vector3uint8>;
 using Vector4i_allocator = Eigen::aligned_allocator<Eigen::Vector4i>;
 using Vector4d_allocator = Eigen::aligned_allocator<Eigen::Vector4d>;
 using Vector6d_allocator = Eigen::aligned_allocator<Eigen::Vector6d>;
+#endif
 
 /// Genretate a skew-symmetric matrix from a vector 3x1.
 Eigen::Matrix3d SkewMatrix(const Eigen::Vector3d &vec);
