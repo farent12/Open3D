@@ -33,10 +33,10 @@
 // This header is in the embree src dir (embree/src/ext_embree/..).
 #include <embree3/rtcore.h>
 #include <tbb/parallel_for.h>
-#include <tutorials/common/math/closest_point.h>
 
 #include <Eigen/Core>
 #include <tuple>
+#include <unsupported/Eigen/AlignedVector3>
 #include <vector>
 
 #include "open3d/core/TensorCheck.h"
@@ -44,6 +44,11 @@
 #include "open3d/utility/Logging.h"
 
 namespace {
+
+typedef Eigen::AlignedVector3<float> Vec3fa;
+// Dont force alignment for Vec2f because we use it just for storing
+typedef Eigen::Matrix<float, 2, 1, Eigen::DontAlign> Vec2f;
+typedef Eigen::Vector3f Vec3f;
 
 // Error function called by embree.
 void ErrorFunction(void* userPtr, enum RTCError error, const char* str) {
@@ -124,22 +129,92 @@ void CountIntersectionsFunc(const RTCFilterFunctionNArguments* args) {
     }
 }
 
+// Adapted from common/math/closest_point.h
+inline Vec3fa closestPointTriangle(Vec3fa const& p,
+                                   Vec3fa const& a,
+                                   Vec3fa const& b,
+                                   Vec3fa const& c,
+                                   float& tex_u,
+                                   float& tex_v) {
+    const Vec3fa ab = b - a;
+    const Vec3fa ac = c - a;
+    const Vec3fa ap = p - a;
+
+    const float d1 = ab.dot(ap);
+    const float d2 = ac.dot(ap);
+    if (d1 <= 0.f && d2 <= 0.f) {
+        tex_u = 0;
+        tex_v = 0;
+        return a;
+    }
+
+    const Vec3fa bp = p - b;
+    const float d3 = ab.dot(bp);
+    const float d4 = ac.dot(bp);
+    if (d3 >= 0.f && d4 <= d3) {
+        tex_u = 1;
+        tex_v = 0;
+        return b;
+    }
+
+    const Vec3fa cp = p - c;
+    const float d5 = ab.dot(cp);
+    const float d6 = ac.dot(cp);
+    if (d6 >= 0.f && d5 <= d6) {
+        tex_u = 0;
+        tex_v = 1;
+        return c;
+    }
+
+    const float vc = d1 * d4 - d3 * d2;
+    if (vc <= 0.f && d1 >= 0.f && d3 <= 0.f) {
+        const float v = d1 / (d1 - d3);
+        tex_u = v;
+        tex_v = 0;
+        return a + v * ab;
+    }
+
+    const float vb = d5 * d2 - d1 * d6;
+    if (vb <= 0.f && d2 >= 0.f && d6 <= 0.f) {
+        const float v = d2 / (d2 - d6);
+        tex_u = 0;
+        tex_v = v;
+        return a + v * ac;
+    }
+
+    const float va = d3 * d6 - d5 * d4;
+    if (va <= 0.f && (d4 - d3) >= 0.f && (d5 - d6) >= 0.f) {
+        const float v = (d4 - d3) / ((d4 - d3) + (d5 - d6));
+        tex_u = 1 - v;
+        tex_v = v;
+        return b + v * (c - b);
+    }
+
+    const float denom = 1.f / (va + vb + vc);
+    const float v = vb * denom;
+    const float w = vc * denom;
+    tex_u = v;
+    tex_v = w;
+    return a + v * ab + w * ac;
+}
+
 struct ClosestPointResult {
     ClosestPointResult()
         : primID(RTC_INVALID_GEOMETRY_ID),
           geomID(RTC_INVALID_GEOMETRY_ID),
           geometry_ptrs_ptr() {}
 
-    embree::Vec3f p;
+    Vec3f p;
     unsigned int primID;
     unsigned int geomID;
+    Vec2f uv;
+    Vec3f n;
     std::vector<std::tuple<RTCGeometryType, const void*, const void*>>*
             geometry_ptrs_ptr;
 };
 
 // Code adapted from the embree closest_point tutorial.
 bool ClosestPointFunc(RTCPointQueryFunctionArguments* args) {
-    using namespace embree;
     assert(args->userPtr);
     const unsigned int geomID = args->geomID;
     const unsigned int primID = args->primID;
@@ -170,10 +245,10 @@ bool ClosestPointFunc(RTCPointQueryFunctionArguments* args) {
                   vertex_positions[3 * triangle_indices[3 * primID + 2] + 1],
                   vertex_positions[3 * triangle_indices[3 * primID + 2] + 2]);
 
-        // Determine distance to closest point on triangle (implemented in
-        // common/math/closest_point.h).
-        const Vec3fa p = closestPointTriangle(q, v0, v1, v2);
-        float d = distance(q, p);
+        // Determine distance to closest point on triangle
+        float u, v;
+        const Vec3fa p = closestPointTriangle(q, v0, v1, v2, u, v);
+        float d = (q - p).norm();
 
         // Store result in userPtr and update the query radius if we found a
         // point closer to the query position. This is optional but allows for
@@ -183,6 +258,10 @@ bool ClosestPointFunc(RTCPointQueryFunctionArguments* args) {
             result->p = p;
             result->primID = primID;
             result->geomID = geomID;
+            Vec3fa e1 = v1 - v0;
+            Vec3fa e2 = v2 - v0;
+            result->uv = Vec2f(u, v);
+            result->n = (e1.cross(e2)).normalized();
             return true;  // Return true to indicate that the query radius
                           // changed.
         }
@@ -423,6 +502,8 @@ struct RaycastingScene::Impl {
                               float* closest_points,
                               unsigned int* geometry_ids,
                               unsigned int* primitive_ids,
+                              float* primitive_uvs,
+                              float* primitive_normals,
                               const int nthreads) {
         if (!scene_committed_) {
             rtcCommitScene(scene_);
@@ -446,11 +527,16 @@ struct RaycastingScene::Impl {
                 rtcPointQuery(scene_, &query, &instStack, &ClosestPointFunc,
                               (void*)&result);
 
-                closest_points[3 * i + 0] = result.p.x;
-                closest_points[3 * i + 1] = result.p.y;
-                closest_points[3 * i + 2] = result.p.z;
+                closest_points[3 * i + 0] = result.p.x();
+                closest_points[3 * i + 1] = result.p.y();
+                closest_points[3 * i + 2] = result.p.z();
                 geometry_ids[i] = result.geomID;
                 primitive_ids[i] = result.primID;
+                primitive_uvs[2 * i + 0] = result.uv.x();
+                primitive_uvs[2 * i + 1] = result.uv.y();
+                primitive_normals[3 * i + 0] = result.n.x();
+                primitive_normals[3 * i + 1] = result.n.y();
+                primitive_normals[3 * i + 2] = result.n.z();
             }
         };
 
@@ -469,8 +555,14 @@ struct RaycastingScene::Impl {
     }
 };
 
-RaycastingScene::RaycastingScene() : impl_(new RaycastingScene::Impl()) {
-    impl_->device_ = rtcNewDevice(NULL);
+RaycastingScene::RaycastingScene(int64_t nthreads)
+    : impl_(new RaycastingScene::Impl()) {
+    if (nthreads > 0) {
+        std::string config("threads=" + std::to_string(nthreads));
+        impl_->device_ = rtcNewDevice(config.c_str());
+    } else {
+        impl_->device_ = rtcNewDevice(NULL);
+    }
     rtcSetDeviceErrorFunction(impl_->device_, ErrorFunction, NULL);
 
     impl_->scene_ = rtcNewScene(impl_->device_);
@@ -629,12 +721,17 @@ RaycastingScene::ComputeClosestPoints(const core::Tensor& query_points,
     result["primitive_ids"] = core::Tensor(shape, core::UInt32);
     shape.push_back(3);
     result["points"] = core::Tensor(shape, core::Float32);
+    result["primitive_normals"] = core::Tensor(shape, core::Float32);
+    shape.back() = 2;
+    result["primitive_uvs"] = core::Tensor(shape, core::Float32);
 
     auto data = query_points.Contiguous();
     impl_->ComputeClosestPoints(data.GetDataPtr<float>(), num_query_points,
                                 result["points"].GetDataPtr<float>(),
                                 result["geometry_ids"].GetDataPtr<uint32_t>(),
                                 result["primitive_ids"].GetDataPtr<uint32_t>(),
+                                result["primitive_uvs"].GetDataPtr<float>(),
+                                result["primitive_normals"].GetDataPtr<float>(),
                                 nthreads);
 
     return result;

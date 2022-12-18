@@ -26,6 +26,7 @@
 
 #include "open3d/core/linalg/LU.h"
 
+#include "open3d/core/CUDAUtils.h"
 #include "open3d/core/linalg/LUImpl.h"
 #include "open3d/core/linalg/LinalgHeadersCPU.h"
 #include "open3d/core/linalg/Tri.h"
@@ -33,7 +34,7 @@
 namespace open3d {
 namespace core {
 
-// Get column permutation tensor from ipiv (swaping index array).
+// Get column permutation tensor from ipiv (swapping index array).
 static core::Tensor GetColPermutation(const Tensor& ipiv,
                                       int number_of_indices,
                                       int number_of_rows) {
@@ -64,7 +65,7 @@ static void OutputToPLU(const Tensor& output,
 
     // Get upper and lower matrix from output matrix.
     Triul(output, upper, lower, 0);
-    // Get column permutaion vector from pivot indices vector.
+    // Get column permutation vector from pivot indices vector.
     Tensor col_permutation = GetColPermutation(ipiv, ipiv.GetShape()[0], n);
     // Creating "Permutation Matrix (P in P.A = L.U)".
     permutation = core::Tensor::Eye(n, output.GetDtype(), device)
@@ -96,7 +97,7 @@ void LUIpiv(const Tensor& A, Tensor& ipiv, Tensor& output) {
                 "Tensor shapes should not contain dimensions with zero.");
     }
 
-    // "output" tensor is modified in-place as ouput.
+    // "output" tensor is modified in-place as output.
     // Operations are COL_MAJOR.
     output = A.T().Clone();
     void* A_data = output.GetDataPtr();
@@ -106,8 +107,9 @@ void LUIpiv(const Tensor& A, Tensor& ipiv, Tensor& output) {
     // elements as U, (diagonal elements of L are unity), and ipiv array,
     // which has the pivot indices (for 1 <= i <= min(M,N), row i of the
     // matrix was interchanged with row IPIV(i).
-    if (device.GetType() == Device::DeviceType::CUDA) {
+    if (device.IsCUDA()) {
 #ifdef BUILD_CUDA_MODULE
+        CUDAScopedDevice scoped_device(device);
         int64_t ipiv_len = std::min(rows, cols);
         ipiv = core::Tensor::Empty({ipiv_len}, core::Int32, device);
         void* ipiv_data = ipiv.GetDataPtr();

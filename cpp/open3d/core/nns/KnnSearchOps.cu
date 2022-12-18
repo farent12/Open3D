@@ -52,6 +52,7 @@ void KnnSearchCUDABruteForce(const Tensor& points,
                              int knn,
                              OUTPUT_ALLOCATOR& output_allocator,
                              Tensor& query_neighbors_row_splits) {
+    CUDAScopedDevice scoped_device(points.GetDevice());
     const cudaStream_t stream = cuda::GetStream();
     int num_points = points.GetShape(0);
     int num_queries = queries.GetShape(0);
@@ -117,11 +118,13 @@ void KnnSearchCUDAOptimized(const Tensor& points,
                             int knn,
                             OUTPUT_ALLOCATOR& output_allocator,
                             Tensor& query_neighbors_row_splits) {
+    CUDAScopedDevice scoped_device(points.GetDevice());
     int num_points = points.GetShape(0);
     int num_queries = queries.GetShape(0);
     int dim = points.GetShape(1);
     Device device = points.GetDevice();
     Dtype dtype = points.GetDtype();
+    Dtype index_dtype = Dtype::FromType<TIndex>();
 
     // Return if input points are empty.
     if (num_points == 0 || num_queries == 0) {
@@ -162,7 +165,7 @@ void KnnSearchCUDAOptimized(const Tensor& points,
     Tensor buf_distances =
             Tensor::Empty({tile_rows, num_cols * knn}, dtype, device);
     Tensor buf_indices =
-            Tensor::Empty({tile_rows, num_cols * knn}, Dtype::Int32, device);
+            Tensor::Empty({tile_rows, num_cols * knn}, index_dtype, device);
 
     // Iterate row-wise.
     for (int i = 0; i < num_queries; i += tile_rows) {
@@ -201,17 +204,17 @@ void KnnSearchCUDAOptimized(const Tensor& points,
                             output_allocator.NeighborsDistance_()
                                     .View({num_queries, knn})
                                     .Slice(0, i, i + num_queries_i);
-                    runL2SelectMin<T>(cur_stream, temp_distances_view,
-                                      point_norms_j, out_distances_view,
-                                      out_indices_view, knn, num_cols,
-                                      tile_cols);
+                    runL2SelectMin<T, TIndex>(cur_stream, temp_distances_view,
+                                              point_norms_j, out_distances_view,
+                                              out_indices_view, knn, num_cols,
+                                              tile_cols);
                     out_distances_view.Add_(
                             query_norms_i.View({num_queries_i, 1}));
                 } else {
-                    runL2SelectMin<T>(cur_stream, temp_distances_view,
-                                      point_norms_j, buf_distances_col_view,
-                                      buf_indices_col_view, knn, num_cols,
-                                      tile_cols);
+                    runL2SelectMin<T, TIndex>(
+                            cur_stream, temp_distances_view, point_norms_j,
+                            buf_distances_col_view, buf_indices_col_view, knn,
+                            num_cols, tile_cols);
                     buf_distances_col_view.Add_(
                             query_norms_i.View({num_queries_i, 1}));
                 }
@@ -240,6 +243,7 @@ void KnnSearchCUDA(const Tensor& points,
                    Tensor& neighbors_index,
                    Tensor& neighbors_row_splits,
                    Tensor& neighbors_distance) {
+    CUDAScopedDevice scoped_device(points.GetDevice());
     int num_points = points.GetShape(0);
     int num_queries = queries.GetShape(0);
     Device device = points.GetDevice();
