@@ -133,6 +133,9 @@ public:
     /// smaller value leads to denser output point cloud.
     std::shared_ptr<PointCloud> VoxelDownSample(double voxel_size) const;
 
+    // MM: Same function as above, but without shared_ptr return
+    PointCloud VoxelDownSample2(double voxel_size) const;
+
     /// \brief Function to downsample using geometry.PointCloud.VoxelDownSample
     ///
     /// Also records point cloud index before downsampling.
